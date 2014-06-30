@@ -9,6 +9,7 @@ import glob
 import time
 import shutil
 import syslog
+import logging
 import tarfile
 import optparse
 import ConfigParser
@@ -25,7 +26,7 @@ def remove_older_than(pattern, x):
     files.sort(key=lambda f: os.path.getmtime(f))
     for file in files[:-x]:
 	os.remove(file)
-        syslog.syslog("remove %s" % file)
+        log("remove %s" % file)
 
 def json_dump(fd, values):
     json.dump(values, fd, indent=4, sort_keys=True)
@@ -36,7 +37,7 @@ def dump_members(gh, org, destdir, retention, dirname='members'):
     archname = join(ddir, "%s-%s.tar.bz2" % ( dirname, TODAY ))
 
     if exists(archname):
-        syslog.syslog("%s already exists" % archname)
+        log("%s already exists" % archname)
         return
 
     if not os.path.isdir(ddir):
@@ -52,7 +53,7 @@ def dump_members(gh, org, destdir, retention, dirname='members'):
     tar.add(temp, arcname=dirname)
     tar.close()
     shutil.rmtree(temp)
-    syslog.syslog("%s are backed up in %s" % ( dirname, archname ))
+    log("%s are backed up in %s" % ( dirname, archname ))
     remove_older_than(join(ddir, "%s-*.tar.bz2" % dirname), retention)
 
 def dump_teams(org, destdir, retention, dirname='teams'):
@@ -61,7 +62,7 @@ def dump_teams(org, destdir, retention, dirname='teams'):
     archname = join(ddir, "%s-%s.tar.bz2" % ( dirname, TODAY))
 
     if exists(archname):
-        syslog.syslog("%s already exists" % archname)
+        log("%s already exists" % archname)
         return
 
     if not os.path.isdir(ddir):
@@ -82,7 +83,7 @@ def dump_teams(org, destdir, retention, dirname='teams'):
     tar.add(temp, arcname=dirname)
     tar.close()
     shutil.rmtree(temp)
-    syslog.syslog("%s are backed up in %s" % ( dirname, archname ))
+    log("%s are backed up in %s" % ( dirname, archname ))
     remove_older_than(join(ddir, "%s-*.tar.bz2" % dirname), retention)
 
 def dump_repo_details(repo, destdir):
@@ -134,63 +135,63 @@ def dump_repo(org, username, password, type, destdir, retention):
     count = 0
 
     for repo in org.iter_repos(type=type):
+        try:
+            repodir = "%s-repos" % type
+            ddir = join(destdir, repodir)
+            reponame = "%s-%s" % ( repo.name, repo.id )
+            archname = join(ddir, "%s-%s.tar.bz2" % ( reponame, TODAY ))
 
-	while True:
-            try:
-                repodir = "%s-repos" % type
-                ddir = join(destdir, repodir)
-                reponame = "%s-%s" % ( repo.name, repo.id )
-                archname = join(ddir, "%s-%s.tar.bz2" % ( reponame, TODAY ))
+            if exists(archname):
+                log("%s already exists" % archname)
+                continue
 
-                if exists(archname):
-                    syslog.syslog("%s already exists" % archname)
-                    continue
+            if not os.path.isdir(ddir):
+                os.mkdir(ddir)
 
-                if not os.path.isdir(ddir):
-                    os.mkdir(ddir)
+            temp = mkdtemp(dir=destdir)
 
-                temp = mkdtemp(dir=destdir)
+            repo_data = {
+              'username' : username,
+              'password' : password,
+              'organization': org.login,
+              'repository' : repo.name
+            }
 
-                repo_data = {
-                  'username' : username,
-                  'password' : password,
-                  'organization': org.login,
-                  'repository' : repo.name
-                }
+            git.Repo.clone_from(
+                REPO_URL % repo_data, join(temp, repo.name), mirror=True)
 
-                git.Repo.clone_from(
-                    REPO_URL % repo_data, join(temp, repo.name), mirror=True)
+            if repo.has_wiki:
+                try:
+                    git.Repo.clone_from(
+                        WIKI_URL % repo_data, join(temp, "%s.wiki" % repo.name), mirror=True)
+                except git.exc.GitCommandError:
+                    pass # the wiki is enabled but empty!"
 
-                if repo.has_wiki:
-                    try:
-                        git.Repo.clone_from(
-                            WIKI_URL % repo_data, join(temp, "%s.wiki" % repo.name), mirror=True)
-                    except git.exc.GitCommandError:
-                        pass # the wiki is enabled but empty!"
+            dump_repo_details(repo, temp)
+            dump_collaborators(repo, temp)
+            dump_repo_pulls(repo, temp)
 
-                dump_repo_details(repo, temp)
-                dump_collaborators(repo, temp)
-                dump_repo_pulls(repo, temp)
+            if repo.has_issues:
+                dump_repo_issues(repo, temp)
 
-                if repo.has_issues:
-                    dump_repo_issues(repo, temp)
+            tar = tarfile.open(archname, "w:bz2")
+            tar.add(temp, arcname=reponame)
+            tar.close()
+            shutil.rmtree(temp)
+            log("repo %s is backed up in %s" % ( repo.name, archname ))
+            count += 1
+            remove_older_than(join(ddir, "%s-*.tar.bz2" % reponame), retention)
 
-                tar = tarfile.open(archname, "w:bz2")
-                tar.add(temp, arcname=reponame)
-                tar.close()
-                shutil.rmtree(temp)
-                syslog.syslog("repo %s is backed up in %s" % ( repo.name, archname ))
-                count += 1
-                remove_older_than(join(ddir, "%s-*.tar.bz2" % reponame), retention)
-                break
-
-            except:
-                syslog.syslog("Unexpected error: %s" % sys.exc_info()[0])
-                syslog.syslog("sleep 5 seconds and try again ...")
-                shutil.rmtree(temp)
-                time.sleep(5)
+        except:
+            log("Unexpected error: %s" % sys.exc_info()[0])
+            log("sleep 5 seconds and try again ...")
+            shutil.rmtree(temp)
+            time.sleep(5)
 
     return count
+
+def log(msg):
+    logging.warning(msg)
 
 if __name__ == "__main__":
 
@@ -211,8 +212,8 @@ if __name__ == "__main__":
     destdir = config.get('github-backup', 'destdir')
     retention = int(config.get('github-backup', 'retention'))
 
-    syslog.openlog('github-backup')
-    syslog.syslog("starting a new session of backup")
+    #syslog.openlog('github-backup')
+    log("starting a new session of backup")
 
     gh = login(username, password)
     org = gh.organization(organization)
@@ -223,5 +224,5 @@ if __name__ == "__main__":
     public_count  = dump_repo(org, username, password, 'public', destdir, retention)
     private_count = dump_repo(org, username, password, 'private', destdir, retention)
 
-    syslog.syslog("session is now completed, %s public and %s private repositories backed up" % ( public_count, private_count ))
-    syslog.closelog()
+    log("session is now completed, %s public and %s private repositories backed up" % ( public_count, private_count ))
+    #syslog.closelog()
